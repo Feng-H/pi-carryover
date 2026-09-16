@@ -1,0 +1,25 @@
+{
+  "name": "pi-carryover",
+  "version": "1.0.0",
+  "description": "Cross-session work carryover for pi: auto-loaded project state notes + /resume session linkage, with 3-tier reliability (agent-maintained notes, LLM exit summary, raw fallback)",
+  "type": "module",
+  "license": "MIT",
+  "keywords": [
+    "pi-package"
+  ],
+  "pi": {
+    "extensions": [
+      "./extensions"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-ai": "^0.85.1",
+    "@earendil-works/pi-coding-agent": "^0.85.1",
+    "typescript": "^7.0.2"
+  }
+}

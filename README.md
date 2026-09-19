@@ -1,10 +1,23 @@
 # pi-carryover
 
+[![npm version](https://img.shields.io/npm/v/pi-carryover.svg?color=blue)](https://www.npmjs.com/package/pi-carryover)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
 **[English](#how-is-this-different-from-pis-built-in-handoff-and-pi--c) | [简体中文](#中文说明)**
 
 > Cross-session work carryover for the [pi](https://pi.dev) coding agent — quit today, and tomorrow's fresh `pi` already knows exactly what's unfinished and what's next.
 
 Every project gets a `<cwd>/.pi/CARRYOVER.md` holding **only unfinished work** (TODOs, key decisions, blockers, next steps — completed items are always dropped). It's injected into the system prompt at every session start, per project directory.
+
+## Install
+
+Install via **npm** (recommended):
+
+```bash
+pi install npm:pi-carryover
+```
+
+Or install directly from **GitHub**:
 
 ```bash
 pi install git:github.com/Feng-H/pi-carryover
@@ -92,21 +105,31 @@ Notes on the recurring cost:
 <project>/.pi/.carryover-session  # last session file path (for /resume linkage)
 ```
 
-## License
-
-MIT
-
 ---
 
 ## 中文说明
+
+[![npm version](https://img.shields.io/npm/v/pi-carryover.svg?color=blue)](https://www.npmjs.com/package/pi-carryover)
 
 > pi coding agent 的跨会话工作承接扩展 —— 今天退出，明天全新启动的 `pi` 已经知道还有什么没干完、下一步是什么。
 
 每个项目目录维护一份 `<cwd>/.pi/CARRYOVER.md`,**只保留未完成的工作**(待办、关键决策、卡点、下一步 —— 已完成的事项永远会被删掉)。每次会话启动自动注入 system prompt,按项目目录隔离。
 
+### 安装方式
+
+通过 **npm 官方镜像** 安装（推荐）：
+
+```bash
+pi install npm:pi-carryover
+```
+
+或者直接从 **GitHub** 安装：
+
 ```bash
 pi install git:github.com/Feng-H/pi-carryover
 ```
+
+- npm 官方包页面：[https://www.npmjs.com/package/pi-carryover](https://www.npmjs.com/package/pi-carryover)
 
 零配置,装完即用,对所有项目目录生效。
 
@@ -127,7 +150,7 @@ pi install git:github.com/Feng-H/pi-carryover
 
 - `pi -c` / `/resume` = **数据库** —— 什么都不丢,但你得知道去哪找,回放要付完整上下文的钱;
 - `/handoff` = **快递员** —— "我现在要切新任务,把要紧的东西打包成一个 prompt";
-- `pi-carryover = **白板上的便签** —— 永远最新,任何一次开工都能看到。
+- `pi-carryover` = **白板上的便签** —— 永远最新,任何一次开工都能看到。
 
 三者可以组合:平时用 carryover 维持项目状态;切新任务用 `/handoff`;需要历史细节时用 `/resume`(路径已替你记好)。
 
@@ -187,3 +210,7 @@ pi install git:github.com/Feng-H/pi-carryover
 <project>/.pi/CARRYOVER.md        # 笔记(markdown,人可读可改,可进 git)
 <project>/.pi/.carryover-session  # 最近会话文件路径(供 /resume 联动)
 ```
+
+## License
+
+MIT

@@ -1,6 +1,6 @@
 {
   "name": "pi-carryover",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "Cross-session work carryover for pi: auto-loaded project state notes + /resume session linkage, with 3-tier reliability (agent-maintained notes, LLM exit summary, raw fallback)",
   "type": "module",
   "license": "MIT",

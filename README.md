@@ -3,6 +3,7 @@
 [![npm version](https://img.shields.io/npm/v/pi-carryover.svg?color=blue)](https://www.npmjs.com/package/pi-carryover)
 [![npm downloads](https://img.shields.io/npm/dt/pi-carryover.svg?color=green)](https://www.npmjs.com/package/pi-carryover)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![pi-package](https://img.shields.io/badge/pi-package-00b57a)](https://pi.dev/packages)
 
 **[English](#how-is-this-different-from-pis-built-in-handoff-and-pi--c) | [简体中文](#中文说明)**
 
@@ -109,9 +110,6 @@ Notes on the recurring cost:
 ---
 
 ## 中文说明
-
-[![npm version](https://img.shields.io/npm/v/pi-carryover.svg?color=blue)](https://www.npmjs.com/package/pi-carryover)
-[![npm downloads](https://img.shields.io/npm/dt/pi-carryover.svg?color=green)](https://www.npmjs.com/package/pi-carryover)
 
 > pi coding agent 的跨会话工作承接扩展 —— 今天退出，明天全新启动的 `pi` 已经知道还有什么没干完、下一步是什么。
 

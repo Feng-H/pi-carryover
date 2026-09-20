@@ -12,6 +12,15 @@
       "./extensions"
     ]
   },
+  "author": "Feng-H",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Feng-H/pi-carryover.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Feng-H/pi-carryover/issues"
+  },
+  "homepage": "https://github.com/Feng-H/pi-carryover#readme",
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",
     "@earendil-works/pi-coding-agent": "*",

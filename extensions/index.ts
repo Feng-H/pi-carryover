@@ -15,7 +15,14 @@
  * 注入时附带提示，需要回看完整历史细节时用 /resume 直接定位 ——
  * pi 自带机制是数据层（完整历史永远在），本扩展是状态层（永远知道该干什么）。
  *
- * 命令：/carryover 查看 | /carryover save 手动生成 | /carryover clear 清空
+ * v1.1.0 话题压缩（Topic Compaction）：上下文全生命周期记忆的会话内一环。
+ *   - input 钩子零 LLM 检测话题切换（新消息 vs 近期话题窗口的词频覆盖）
+ *   - suggest（默认）提示用户 /compact；auto（opt-in）ctx.compact 主动压缩
+ *   - session_compact 钩子把每次压缩摘要归档到 <cwd>/.pi/topics/（压缩即沉淀）
+ *   - /carryover topics 查看话题归档
+ *   配置：~/.pi/agent/settings.json 的 carryover.topicCompact 节
+ *
+ * 命令：/carryover 查看 | /carryover save 手动生成 | /carryover clear 清空 | /carryover topics 话题归档
  */
 
 import { uuidv7 } from "@earendil-works/pi-ai";
@@ -23,6 +30,7 @@ import { complete } from "@earendil-works/pi-ai/compat";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 
 const STORE_DIR = ".pi";
@@ -205,6 +213,169 @@ async function generateSummary(
   }
 }
 
+// ---------- 话题压缩（v1.1.0）----------
+
+const TOPIC_WINDOW = 6; // 近期用户消息窗口（当前话题样本）
+const SHIFT_COVERAGE = 0.12; // 新消息词频被窗口覆盖比例低于此值 → 疑似话题切换
+const MIN_NEW_TOKENS = 6; // 新消息有效词条数下限（太少无法判断）
+const MAX_ARCHIVES = 50; // 话题归档数量上限（超出删最旧）
+
+const AUTO_COMPACT_INSTRUCTIONS =
+  "用户已切换话题。请在摘要中完整保留旧话题的目标、已完成的结论、关键决策、文件读取/修改清单与未完成事项，便于日后召回；对与新话题已无关的内容不要展开。";
+
+const LATIN_STOPWORDS = new Set([
+  "the", "a", "an", "and", "or", "but", "if", "then", "this", "that", "these", "those",
+  "is", "are", "was", "were", "be", "been", "to", "of", "in", "on", "for", "with",
+  "as", "at", "by", "from", "it", "its", "you", "we", "they", "me", "my", "our",
+  "do", "does", "did", "can", "could", "should", "would", "will", "not", "no", "yes",
+  "what", "which", "who", "how", "when", "where", "why", "all", "any", "some", "more",
+  "other", "into", "over", "under", "about", "just", "than", "too", "very", "now",
+  "there", "here", "them", "his", "her", "him", "she", "he", "have", "has", "had",
+]);
+
+export interface TopicCompactConfig {
+  mode: "off" | "suggest" | "auto";
+  minTokens: number;
+  cooldownTurns: number;
+  archive: boolean;
+}
+
+const DEFAULT_TOPIC_CONFIG: TopicCompactConfig = {
+  mode: "suggest",
+  minTokens: 40_000,
+  cooldownTurns: 3,
+  archive: true,
+};
+
+/** 全局 settings.json 路径（测试可用 PI_CARRYOVER_DIR 注入） */
+function agentSettingsPath(): string {
+  return path.join(process.env.PI_CARRYOVER_DIR ?? path.join(os.homedir(), ".pi", "agent"), "settings.json");
+}
+
+/** 读取 carryover.topicCompact 配置（异常/缺失回落默认值，绝不影响输入链路） */
+export function readTopicConfig(): TopicCompactConfig {
+  const cfg = { ...DEFAULT_TOPIC_CONFIG };
+  try {
+    const raw = JSON.parse(fs.readFileSync(agentSettingsPath(), "utf8"));
+    const tc = raw?.carryover?.topicCompact;
+    if (tc && typeof tc === "object") {
+      if (tc.mode === "off" || tc.mode === "suggest" || tc.mode === "auto") cfg.mode = tc.mode;
+      if (typeof tc.minTokens === "number" && tc.minTokens >= 0) cfg.minTokens = tc.minTokens;
+      if (typeof tc.cooldownTurns === "number" && tc.cooldownTurns >= 0) cfg.cooldownTurns = tc.cooldownTurns;
+      if (typeof tc.archive === "boolean") cfg.archive = tc.archive;
+    }
+  } catch {
+    /* 配置缺失/损坏 → 默认值 */
+  }
+  return cfg;
+}
+
+/** 分词：拉丁词（去停用词）+ CJK 二元组。零依赖零 LLM。 */
+export function tokenize(text: string): string[] {
+  const out: string[] = [];
+  for (const w of text.toLowerCase().match(/[a-z_][a-z0-9_-]{2,}/g) ?? []) {
+    if (!LATIN_STOPWORDS.has(w)) out.push(w);
+  }
+  const cjk = (text.match(/[\u4e00-\u9fff]+/g) ?? []).join("");
+  for (let i = 0; i + 1 < cjk.length; i++) out.push(cjk.slice(i, i + 2));
+  return out;
+}
+
+/** 覆盖率：新消息词条被窗口命中的比例 */
+export function coverageOf(newTokens: Set<string>, windowTokens: Set<string>): number {
+  if (newTokens.size === 0) return 1;
+  let hit = 0;
+  for (const t of newTokens) if (windowTokens.has(t)) hit++;
+  return hit / newTokens.size;
+}
+
+/** 话题切换检测：新输入 vs 近期话题窗口。词条不足/窗口太短时不判定。 */
+export function detectTopicShift(input: string, recentInputs: string[]): { shift: boolean; coverage: number } {
+  const nt = new Set(tokenize(input));
+  if (nt.size < MIN_NEW_TOKENS || recentInputs.length < 2) return { shift: false, coverage: 1 };
+  const wt = new Set(recentInputs.flatMap(tokenize));
+  if (wt.size === 0) return { shift: true, coverage: 0 };
+  const cov = coverageOf(nt, wt);
+  return { shift: cov < SHIFT_COVERAGE, coverage: cov };
+}
+
+function topicsDir(cwd: string): string {
+  return path.join(cwd, STORE_DIR, "topics");
+}
+
+/** 压缩摘要 → 话题归档（压缩即沉淀）。返回归档文件路径，失败返回 null。 */
+export function writeTopicArchive(cwd: string, summary: string, tokensBefore: number, reason: string): string | null {
+  try {
+    const dir = topicsDir(cwd);
+    fs.mkdirSync(dir, { recursive: true });
+    const ts = new Date();
+    const pad = (n: number) => String(n).padStart(2, "0");
+    const name =
+      `${ts.getFullYear()}-${pad(ts.getMonth() + 1)}-${pad(ts.getDate())}` +
+      `_${pad(ts.getHours())}${pad(ts.getMinutes())}${pad(ts.getSeconds())}.md`;
+    const file = path.join(dir, name);
+    const title =
+      summary
+        .split("\n")
+        .map((l) => l.trim())
+        .find((l) => l && !l.startsWith("<!--") && !l.startsWith("#")) ?? "话题摘要";
+    const content = [
+      `<!-- topic-archive @ ${ts.toISOString()} reason=${reason} tokensBefore=${tokensBefore} -->`,
+      `# ${title.replace(/^#+\s*/, "").slice(0, 60)}`,
+      "",
+      summary,
+      "",
+    ].join("\n");
+    fs.writeFileSync(file, content, "utf8");
+    const all = fs.readdirSync(dir).filter((f) => f.endsWith(".md")).sort();
+    while (all.length > MAX_ARCHIVES) fs.rmSync(path.join(dir, all.shift()!), { force: true });
+    return file;
+  } catch {
+    return null;
+  }
+}
+
+export interface TopicArchiveInfo {
+  file: string;
+  title: string;
+  tokensBefore: number | null;
+  ts: string;
+}
+
+/** 列出话题归档（新→旧） */
+export function listTopicArchives(cwd: string): TopicArchiveInfo[] {
+  try {
+    const dir = topicsDir(cwd);
+    if (!fs.existsSync(dir)) return [];
+    return fs
+      .readdirSync(dir)
+      .filter((f) => f.endsWith(".md"))
+      .sort()
+      .reverse()
+      .map((f) => {
+        const file = path.join(dir, f);
+        let title = f;
+        let tokensBefore: number | null = null;
+        let ts = "";
+        try {
+          const text = fs.readFileSync(file, "utf8");
+          const m = text.match(/<!-- topic-archive @ ([^ ]+) reason=\S+ tokensBefore=(\d+) -->/);
+          if (m) {
+            ts = m[1];
+            tokensBefore = Number(m[2]);
+          }
+          const h = text.match(/^# (.+)$/m);
+          if (h) title = h[1];
+        } catch {
+          /* 单文件读失败跳过展示细节 */
+        }
+        return { file, title, tokensBefore, ts };
+      });
+  } catch {
+    return [];
+  }
+}
+
 // ---------- 扩展 ----------
 
 export default function (pi: ExtensionAPI) {
@@ -310,12 +481,96 @@ export default function (pi: ExtensionAPI) {
     }
   });
 
-  // 4) /carryover 命令
+  // 5) 话题压缩：input 钩子零 LLM 检测话题切换（suggest 提示 / auto 主动压缩）
+  let recentInputs: string[] = []; // 当前话题窗口（近期用户消息）
+  let turnsSinceTrigger = 0; // 距上次触发/压缩的用户轮数（冷却护栏）
+
+  pi.on("input", async (event: any, ctx: any) => {
+    if (event?.source !== "interactive") return { action: "continue" };
+    const text = String(event?.text ?? "").trim();
+    // 命令、空输入、流式打断消息不参与检测（打断常与当前话题相关）
+    if (!text || text.startsWith("/") || event?.streamingBehavior === "steer") return { action: "continue" };
+    try {
+      const cfg = readTopicConfig();
+      if (cfg.mode !== "off") {
+        turnsSinceTrigger++;
+        const det = detectTopicShift(text, recentInputs);
+        const eligible =
+          det.shift &&
+          recentInputs.length >= 2 &&
+          turnsSinceTrigger > cfg.cooldownTurns;
+        if (eligible) {
+          const usage = ctx.getContextUsage?.();
+          const tokens = usage?.tokens ?? null;
+          if (tokens !== null && tokens >= cfg.minTokens) {
+            turnsSinceTrigger = 0;
+            if (cfg.mode === "auto" && typeof ctx.compact === "function") {
+              ctx.compact({
+                customInstructions: AUTO_COMPACT_INSTRUCTIONS,
+                onError: (e: any) => {
+                  try {
+                    ctx.ui.notify(`🌀 自动压缩失败: ${e?.message ?? e}`, "warning");
+                  } catch {}
+                },
+              });
+              ctx.ui.notify(
+                `🌀 疑似话题切换（覆盖率 ${det.coverage.toFixed(2)}），已自动压缩旧话题上下文（${tokens} tokens）`,
+                "info",
+              );
+            } else {
+              ctx.ui.notify(
+                `🌀 新问题似乎与近期工作关联不大（疑似话题切换），当前上下文 ${tokens} tokens。` +
+                  `可执行 /compact 压缩旧话题（结论保留在摘要中，随时可召回）；` +
+                  `如需自动压缩，在 settings.json 配置 carryover.topicCompact.mode="auto"`,
+                "info",
+              );
+            }
+          }
+        }
+      }
+      recentInputs.push(text);
+      if (recentInputs.length > TOPIC_WINDOW) recentInputs.shift();
+    } catch {
+      /* 检测异常绝不影响正常输入链路 */
+    }
+    return { action: "continue" };
+  });
+
+  // 6) 压缩即沉淀：每次压缩成功后归档摘要，并重置话题窗口
+  pi.on("session_compact", async (event: any, ctx: any) => {
+    recentInputs = [];
+    turnsSinceTrigger = 0;
+    try {
+      const cfg = readTopicConfig();
+      if (!cfg.archive) return;
+      const entry = event?.compactionEntry;
+      if (!entry?.summary) return;
+      const file = writeTopicArchive(ctx.cwd, String(entry.summary), Number(entry.tokensBefore) || 0, String(event?.reason ?? "manual"));
+      if (file && ctx.hasUI) ctx.ui.notify(`📦 旧话题已归档: ${path.basename(file)}（/carryover topics 查看）`, "info");
+    } catch {
+      /* 归档失败不影响压缩本身 */
+    }
+  });
+
+  // 7) /carryover 命令
   pi.registerCommand("carryover", {
-    description: "工作承接 (.pi/CARRYOVER.md)：/carryover 查看 | /carryover save 手动生成 | /carryover clear 清空",
+    description: "工作承接：/carryover 查看 | save 手动生成 | clear 清空 | topics 话题归档",
     handler: async (args: string, ctx: any) => {
       const sub = (args || "").trim().split(/\s+/)[0]?.toLowerCase();
       const p = carryoverPath(ctx.cwd);
+
+      if (sub === "topics") {
+        const list = listTopicArchives(ctx.cwd);
+        if (list.length === 0) {
+          ctx.ui.notify(`暂无话题归档（${topicsDir(ctx.cwd)}）。压缩发生后会自动归档摘要。`, "info");
+          return;
+        }
+        const lines = list
+          .slice(0, 10)
+          .map((a) => `· ${a.tokensBefore != null ? `${a.tokensBefore} tokens · ` : ""}${a.title}`);
+        ctx.ui.notify(`话题归档（共 ${list.length} 份，目录 ${topicsDir(ctx.cwd)}）：\n${lines.join("\n")}`, "info");
+        return;
+      }
 
       if (sub === "clear") {
         try {

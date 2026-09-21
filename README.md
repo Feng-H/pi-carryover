@@ -94,6 +94,28 @@ Notes on the recurring cost:
 
 **Session linkage** — on every save, the current session file path is recorded to `.pi/.carryover-session`; on startup it's injected alongside the notes, so the agent can point you to `/resume` when full-history detail is needed. pi's sessions are the *data layer*; this extension is the *state layer*.
 
+## Topic compaction (v1.1)
+
+pi's built-in compaction is **volume-driven**: it fires only when the context is about to overflow, cutting at an arbitrary point mid-work. This extension adds **semantic timing**: it detects when your new question is unrelated to the recent topic and suggests (or performs, opt-in) compaction at that natural boundary — the best possible moment, with the best possible instructions.
+
+- **Zero-LLM detection** — each interactive input is tokenized (latin words + CJK bigrams, stopwords filtered) and compared against a rolling window of recent messages; coverage below ~12% is treated as a topic shift. No extra API calls, no latency.
+- **Guardrails** — a context floor (`minTokens`, default 40k: tiny contexts aren't worth compacting), a turn cooldown (default 3), short messages and mid-stream interrupts are skipped, detection never touches the input pipeline.
+- **suggest mode (default)** — notifies you with current token count; you decide whether to `/compact`.
+- **auto mode (opt-in)** — calls compaction directly with instructions to fully preserve the old topic's conclusions/decisions/file state in the summary.
+- **Compaction = carryover** — every compaction summary (manual, threshold, or topic-triggered) is archived to `<project>/.pi/topics/` so old topics remain recallable. `fromExtension` summaries too.
+
+```jsonc
+// ~/.pi/agent/settings.json
+"carryover": {
+  "topicCompact": {
+    "mode": "suggest",    // "off" | "suggest" | "auto"
+    "minTokens": 40000,
+    "cooldownTurns": 3,
+    "archive": true
+  }
+}
+```
+
 ## Commands & files
 
 | Command | Description |
@@ -101,10 +123,12 @@ Notes on the recurring cost:
 | `/carryover` | View notes (truncated preview + last session path) |
 | `/carryover save` | Manually generate an LLM summary now |
 | `/carryover clear` | Clear the notes |
+| `/carryover topics` | List topic compaction archives |
 
 ```
 <project>/.pi/CARRYOVER.md        # the notes (markdown, human-editable, git-committable)
 <project>/.pi/.carryover-session  # last session file path (for /resume linkage)
+<project>/.pi/topics/             # topic compaction archives (v1.1, capped at 50)
 ```
 
 ---
@@ -198,6 +222,28 @@ pi install git:github.com/Feng-H/pi-carryover
 
 **会话联动** —— 每次保存都把当前会话文件路径记到 `.pi/.carryover-session`;启动时与笔记一起注入,agent 需要完整历史细节时会指引你用 `/resume`。pi 自带会话是**数据层**,本扩展是**状态层**。
 
+### 话题压缩 (v1.1)
+
+pi 内建的压缩是**体积驱动**的:只在上下文快溢出时才触发,切点落在干活的任意位置。本扩展补上**语义时机**:检测新问题与近期话题无关时,在这个自然边界提示(或选择自动)压缩 —— 最佳时机、最佳指令。
+
+- **零 LLM 检测** —— 每条交互输入分词(拉丁词 + 中文二元组,去停用词),与近期消息窗口比对;覆盖率低于 ~12% 判为话题切换。不额外调 API、零延迟。
+- **护栏** —— 上下文下限(`minTokens` 默认 40k,小上下文不值得压)、轮数冷却(默认 3)、短消息与流式打断跳过;检测异常绝不影响输入链路。
+- **suggest 模式(默认)** —— 提示当前 token 数,由你决定是否 `/compact`。
+- **auto 模式(选开)** —— 直接触发压缩,指令要求完整保留旧话题的结论/决策/文件状态。
+- **压缩即沉淀** —— 每次压缩摘要(手动/阈值/话题触发)都归档到 `<项目>/.pi/topics/`,旧话题随时可召回。
+
+```jsonc
+// ~/.pi/agent/settings.json
+"carryover": {
+  "topicCompact": {
+    "mode": "suggest",    // "off" | "suggest" | "auto"
+    "minTokens": 40000,
+    "cooldownTurns": 3,
+    "archive": true
+  }
+}
+```
+
 ### 命令与文件
 
 | 命令 | 说明 |
@@ -205,10 +251,12 @@ pi install git:github.com/Feng-H/pi-carryover
 | `/carryover` | 查看笔记(截断预览 + 最近会话路径) |
 | `/carryover save` | 立即手动生成 LLM 摘要 |
 | `/carryover clear` | 清空笔记 |
+| `/carryover topics` | 查看话题压缩归档 |
 
 ```
 <project>/.pi/CARRYOVER.md        # 笔记(markdown,人可读可改,可进 git)
 <project>/.pi/.carryover-session  # 最近会话文件路径(供 /resume 联动)
+<project>/.pi/topics/             # 话题压缩归档(v1.1,上限 50 份)
 ```
 
 ## License

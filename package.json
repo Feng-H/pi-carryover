@@ -1,6 +1,6 @@
 {
   "name": "pi-carryover",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "Cross-session work carryover for pi: auto-loaded project state notes + /resume session linkage, with 3-tier reliability (agent-maintained notes, LLM exit summary, raw fallback). v1.1: topic-aware compaction — detects topic shifts and suggests/auto-compacts old context, archiving every compaction summary as a topic archive.",
   "type": "module",
   "license": "MIT",

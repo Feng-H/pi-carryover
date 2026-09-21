@@ -11,6 +11,8 @@
 
 Every project gets a `<cwd>/.pi/CARRYOVER.md` holding **only unfinished work** (TODOs, key decisions, blockers, next steps — completed items are always dropped). It's injected into the system prompt at every session start, per project directory.
 
+**v1.1 — Topic compaction**: pi's built-in compaction only fires when the context is about to overflow (volume-driven, arbitrary cut point). pi-carryover watches every input and, when your new question drifts from the recent topic, suggests — or performs, opt-in — compacting at that natural boundary, and archives every compaction summary under `.pi/topics/` for later recall. Zero-LLM detection, zero extra API cost. See [Topic compaction (v1.1)](#topic-compaction-v11).
+
 ## Install
 
 Install via **npm** (recommended):
@@ -138,6 +140,8 @@ pi's built-in compaction is **volume-driven**: it fires only when the context is
 > pi coding agent 的跨会话工作承接扩展 —— 今天退出，明天全新启动的 `pi` 已经知道还有什么没干完、下一步是什么。
 
 每个项目目录维护一份 `<cwd>/.pi/CARRYOVER.md`,**只保留未完成的工作**(待办、关键决策、卡点、下一步 —— 已完成的事项永远会被删掉)。每次会话启动自动注入 system prompt,按项目目录隔离。
+
+**v1.1 新增 —— 话题压缩**：pi 内建 compaction 只在上下文快溢出时才触发(体积驱动、切点随机)。pi-carryover 监听每条输入，当新问题与近期话题无关时，在这个自然边界**提示**(或选开**自动**)压缩旧话题上下文，并把每次压缩摘要归档到 `.pi/topics/` 随时可召回。零 LLM 检测、零额外 API 开销。详见[话题压缩 (v1.1)](#话题压缩-v11)。
 
 ### 安装方式
 

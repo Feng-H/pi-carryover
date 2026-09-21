@@ -14,6 +14,7 @@ import {
   readTopicConfig,
   writeTopicArchive,
   listTopicArchives,
+  writeEmbedConfig,
 } from "../extensions/index.ts";
 
 function tmpDir() {
@@ -63,6 +64,7 @@ test("readTopicConfig：默认值 / 覆盖 / 损坏配置回落", () => {
       minTokens: 40000,
       cooldownTurns: 3,
       archive: true,
+      embed: { choice: undefined },
     });
     // 覆盖
     fs.mkdirSync(dir, { recursive: true });
@@ -98,4 +100,27 @@ test("writeTopicArchive + listTopicArchives：归档往返与列表", () => {
   assert.ok(text.includes("tokensBefore=88000"));
   // 空目录
   assert.equal(listTopicArchives(tmpDir()).length, 0);
+});
+
+test("v1.1.2 readTopicConfig/writeEmbedConfig：embed 节解析与原子持久化（本文件串行执行避免 env 竞争）", () => {
+  const dir = tmpDir();
+  process.env.PI_CARRYOVER_DIR = dir;
+  try {
+    let cfg = readTopicConfig();
+    assert.equal(cfg.embed.choice, undefined); // 未选择 → 懒引导
+    writeEmbedConfig({ choice: "auto", resolvedEndpoint: "https://hf-mirror.com" });
+    cfg = readTopicConfig();
+    assert.equal(cfg.embed.choice, "auto");
+    assert.equal(cfg.embed.resolvedEndpoint, "https://hf-mirror.com");
+    // 覆盖单键不影响其他键
+    writeEmbedConfig({ choice: "zh" });
+    cfg = readTopicConfig();
+    assert.equal(cfg.embed.choice, "zh");
+    assert.equal(cfg.embed.resolvedEndpoint, "https://hf-mirror.com");
+    // settings.json 顶层键保留
+    const raw = JSON.parse(fs.readFileSync(path.join(dir, "settings.json"), "utf8"));
+    assert.ok(typeof raw === "object");
+  } finally {
+    delete process.env.PI_CARRYOVER_DIR;
+  }
 });

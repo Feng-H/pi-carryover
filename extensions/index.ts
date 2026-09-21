@@ -22,6 +22,13 @@
  *   - /carryover topics 查看话题归档
  *   配置：~/.pi/agent/settings.json 的 carryover.topicCompact 节
  *
+ * v1.1.2 Embedding 语义检测：词法覆盖率对中文系统性误判（同话题措辞改写 cov=0），
+ *   改为按语言路由双小模型（bge-small-zh 23MB + MiniLM 23MB，余弦 avg 完全可分）：
+ *   - 懒引导：首次需要时 ctx.ui.select 选择模型方案，持久化 settings.json
+ *   - 自研预下载器：官方直连→hf-mirror 自动探测 + Range 断点续传（绕开 transformers.js 弱下载）
+ *   - 词法降级：模型不可用时回落（纯中文消息不信任词法误判）
+ *   - auto 模式 LLM 二次确认后才 ctx.compact()
+ *
  * 命令：/carryover 查看 | /carryover save 手动生成 | /carryover clear 清空 | /carryover topics 话题归档
  */
 
@@ -32,6 +39,8 @@ import { Type } from "typebox";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { EmbedEngine, EMBED_MODELS, detectLang, type EmbedChoice } from "./lib/embed.ts";
+import { resolveEndpoint, ensureModelFiles } from "./lib/downloader.ts";
 
 const STORE_DIR = ".pi";
 const CARRYOVER_FILE = "CARRYOVER.md";
@@ -233,11 +242,23 @@ const LATIN_STOPWORDS = new Set([
   "there", "here", "them", "his", "her", "him", "she", "he", "have", "has", "had",
 ]);
 
+export interface TopicCompactEmbedConfig {
+  /** auto = 双模型语言路由 | zh | en | off | undefined（未选择 → 懒引导） */
+  choice: EmbedChoice["choice"];
+  thresholdZh?: number;
+  thresholdEn?: number;
+  /** 用户显式配置的下载源（最高优先级） */
+  endpoint?: string;
+  /** 自动探测结果的持久化缓存 */
+  resolvedEndpoint?: string;
+}
+
 export interface TopicCompactConfig {
   mode: "off" | "suggest" | "auto";
   minTokens: number;
   cooldownTurns: number;
   archive: boolean;
+  embed: TopicCompactEmbedConfig;
 }
 
 const DEFAULT_TOPIC_CONFIG: TopicCompactConfig = {
@@ -245,6 +266,7 @@ const DEFAULT_TOPIC_CONFIG: TopicCompactConfig = {
   minTokens: 40_000,
   cooldownTurns: 3,
   archive: true,
+  embed: { choice: undefined },
 };
 
 /** 全局 settings.json 路径（测试可用 PI_CARRYOVER_DIR 注入） */
@@ -263,11 +285,43 @@ export function readTopicConfig(): TopicCompactConfig {
       if (typeof tc.minTokens === "number" && tc.minTokens >= 0) cfg.minTokens = tc.minTokens;
       if (typeof tc.cooldownTurns === "number" && tc.cooldownTurns >= 0) cfg.cooldownTurns = tc.cooldownTurns;
       if (typeof tc.archive === "boolean") cfg.archive = tc.archive;
+      const e = tc.embed;
+      if (e && typeof e === "object") {
+        if (e.choice === "auto" || e.choice === "zh" || e.choice === "en" || e.choice === "off")
+          cfg.embed.choice = e.choice;
+        if (typeof e.thresholdZh === "number") cfg.embed.thresholdZh = e.thresholdZh;
+        if (typeof e.thresholdEn === "number") cfg.embed.thresholdEn = e.thresholdEn;
+        if (typeof e.endpoint === "string") cfg.embed.endpoint = e.endpoint;
+        if (typeof e.resolvedEndpoint === "string") cfg.embed.resolvedEndpoint = e.resolvedEndpoint;
+      }
     }
   } catch {
     /* 配置缺失/损坏 → 默认值 */
   }
   return cfg;
+}
+
+/** 原子更新 settings.json 的 carryover.topicCompact.embed 节（read-modify-write，保留其他键） */
+export function writeEmbedConfig(patch: Partial<TopicCompactEmbedConfig>): void {
+  const p = agentSettingsPath();
+  try {
+    let raw: any;
+    try {
+      raw = JSON.parse(fs.readFileSync(p, "utf8"));
+    } catch {
+      raw = {}; // 文件不存在/损坏 → 从空对象重建（不得吞掉写入）
+    }
+    if (typeof raw !== "object" || raw === null) raw = {};
+    if (!raw.carryover) raw.carryover = {};
+    if (!raw.carryover.topicCompact) raw.carryover.topicCompact = {};
+    raw.carryover.topicCompact.embed = { ...(raw.carryover.topicCompact.embed ?? {}), ...patch };
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    const tmp = p + ".tmp-carryover";
+    fs.writeFileSync(tmp, JSON.stringify(raw, null, 2), "utf8");
+    fs.renameSync(tmp, p);
+  } catch {
+    /* 持久化失败不影响当次会话 */
+  }
 }
 
 /** 分词：拉丁词（去停用词）+ CJK 二元组。零依赖零 LLM。 */
@@ -376,6 +430,67 @@ export function listTopicArchives(cwd: string): TopicArchiveInfo[] {
   }
 }
 
+const CONFIRM_TIMEOUT_MS = 15_000;
+const CONFIRM_SYSTEM_PROMPT =
+  "你是话题切换判定器。比较『近期对话窗口』与『新消息』是否属于同一工作话题。只回答 yes 或 no，不要任何其他内容。判据：工作目标/领域/对象相同=同一话题；仅措辞改写、深挖细节、换子任务但同目标=同一话题（yes）；领域完全无关=no。";
+
+/** LLM 二次确认（auto 模式压缩前必选）。失败/超时 → 保守返回 false（不压缩）。 */
+export async function llmConfirmShift(
+  ctx: any,
+  windowMsgs: string[],
+  newMsg: string,
+): Promise<boolean | null> {
+  if (!ctx.model) return null;
+  try {
+    const auth = await ctx.modelRegistry.getApiKeyAndHeaders(ctx.model);
+    if (!auth.ok || !auth.apiKey) return null;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), CONFIRM_TIMEOUT_MS);
+    try {
+      const resp = await complete(
+        ctx.model,
+        {
+          systemPrompt: CONFIRM_SYSTEM_PROMPT,
+          messages: [
+            {
+              role: "user",
+              content: [
+                {
+                  type: "text",
+                  text:
+                    `## 近期对话窗口\n${windowMsgs.map((m, i) => `${i + 1}. ${m}`).join("\n")}\n\n## 新消息\n${newMsg}\n\n同一话题？（yes/no）`,
+                },
+              ],
+              timestamp: Date.now(),
+            } as any,
+          ],
+        },
+        {
+          apiKey: auth.apiKey,
+          headers: auth.headers,
+          env: auth.env,
+          signal: controller.signal,
+          cacheRetention: "none",
+          sessionId: uuidv7(),
+          maxTokens: 4,
+        },
+      );
+      const text = resp.content
+        .filter((c: any) => c.type === "text")
+        .map((c: any) => c.text)
+        .join("")
+        .toLowerCase();
+      if (/\byes\b|是/.test(text)) return true;
+      if (/\bno\b|否/.test(text)) return false;
+      return null;
+    } finally {
+      clearTimeout(timer);
+    }
+  } catch {
+    return null;
+  }
+}
+
 // ---------- 扩展 ----------
 
 export default function (pi: ExtensionAPI) {
@@ -481,9 +596,109 @@ export default function (pi: ExtensionAPI) {
     }
   });
 
-  // 5) 话题压缩：input 钩子零 LLM 检测话题切换（suggest 提示 / auto 主动压缩）
-  let recentInputs: string[] = []; // 当前话题窗口（近期用户消息）
+  // 5) 话题压缩：embedding 主检测（语言路由双小模型）+ 词法降级 + 懒引导
+  const engine = new EmbedEngine();
+  engine.cacheDir = path.join(process.env.PI_CARRYOVER_DIR ?? path.join(os.homedir(), ".pi", "agent"), ".cache", "transformers");
+  let recentInputs: string[] = []; // 当前话题窗口（近期用户消息，词法降级用）
   let turnsSinceTrigger = 0; // 距上次触发/压缩的用户轮数（冷却护栏）
+  let guided = false; // 本次会话是否已弹过懒引导
+  let settingUp: Promise<void> | null = null; // 下载/初始化去重
+
+  /** 下载 + 初始化引擎（进度状态栏 + 结果 notify） */
+  async function setupEmbed(ctx: any, choice: "auto" | "zh" | "en"): Promise<boolean> {
+    const cfg = readTopicConfig();
+    const endpoint = await resolveEndpoint({
+      configured: cfg.embed.endpoint,
+      resolved: cfg.embed.resolvedEndpoint,
+    });
+    if (!endpoint) {
+      ctx.ui.notify(
+        "🌀 语义模型下载失败：huggingface.co 与 hf-mirror.com 均不可达。检查网络后重试 /carryover embed on，期间用词法降级检测",
+        "warning",
+      );
+      return false;
+    }
+    if (endpoint !== cfg.embed.resolvedEndpoint) writeEmbedConfig({ resolvedEndpoint: endpoint });
+    const mirrorNote = endpoint.includes("hf-mirror") ? "（已自动切换 hf-mirror.com 镜像）" : "";
+
+    const ensureModel = async (lang: "zh" | "en"): Promise<boolean> => {
+      const spec = EMBED_MODELS[lang];
+      try {
+        ctx.ui?.setStatus?.("carryover-embed", `🌀 下载 ${spec.label}（${spec.sizeMB}MB）${mirrorNote}...`);
+        const ok = await ensureModelFiles(spec.id, spec.files, endpoint, engine.cacheDir!, (p) => {
+          const mb = p.total > 0 ? ` ${((p.bytes / p.total) * 100).toFixed(0)}%` : ` ${(p.bytes / 1e6).toFixed(1)}MB`;
+          try {
+            ctx.ui?.setStatus?.("carryover-embed", `🌀 下载 ${spec.label}：${p.file}${mb}`);
+          } catch {}
+        });
+        return ok;
+      } finally {
+        try {
+          ctx.ui?.setStatus?.("carryover-embed", "");
+        } catch {}
+      }
+    };
+
+    const ok = await engine.init(choice, ensureModel);
+    if (ok) {
+      ctx.ui.notify(
+        `🌀 语义话题检测就绪（${choice === "auto" ? "中英自动路由" : choice === "zh" ? "中文" : "英文"}，离线运行约 2ms/条）`,
+        "info",
+      );
+    } else {
+      ctx.ui.notify(
+        "🌀 语义模型下载失败（网络不稳）。可重试 /carryover embed on；期间用词法降级检测",
+        "warning",
+      );
+    }
+    return ok;
+  }
+
+  /** 懒引导：首次需要 embedding 时弹交互选择（fire-and-forget，不阻塞输入链路） */
+  function maybeGuide(ctx: any): void {
+    if (guided) return;
+    const cfg = readTopicConfig();
+    if (cfg.embed.choice !== undefined) {
+      // 已有持久化选择但引擎未就绪（如刚更新/断网）→ 静默补初始化
+      guided = true;
+      const c = cfg.embed.choice;
+      if (c === "auto" || c === "zh" || c === "en") {
+        settingUp ??= setupEmbed(ctx, c).then(() => {});
+      }
+      return;
+    }
+    if (!ctx.hasUI) return; // 无 UI 环境不引导，词法降级
+    guided = true;
+    void (async () => {
+      try {
+        // 按近期消息语言预选措辞
+        const zhHeavy = recentInputs.length > 0 && recentInputs.every((m) => detectLang(m) === "zh");
+        const options = [
+          `自动路由：中+英双模型（46MB，推荐${zhHeavy ? "，当前会话为中文" : ""}）`,
+          "仅中文 bge-small-zh（23MB）",
+          "仅英文 MiniLM（23MB）",
+          "跳过（词法降级检测）",
+        ];
+        const pick = await ctx.ui.select("🌀 话题压缩：启用语义检测？（本地模型，离线运行）", options);
+        const choice: EmbedChoice["choice"] = pick?.startsWith("自动路由")
+          ? "auto"
+          : pick?.startsWith("仅中文")
+            ? "zh"
+            : pick?.startsWith("仅英文")
+              ? "en"
+              : "off";
+        writeEmbedConfig({ choice });
+        if (choice === "auto" || choice === "zh" || choice === "en") {
+          settingUp ??= setupEmbed(ctx, choice).then(() => {});
+          await settingUp;
+        } else {
+          ctx.ui.notify("已选词法降级（配置 carryover.topicCompact.embed.choice 可重开）", "info");
+        }
+      } catch {
+        /* 引导失败不影响使用 */
+      }
+    })();
+  }
 
   pi.on("input", async (event: any, ctx: any) => {
     if (event?.source !== "interactive") return { action: "continue" };
@@ -494,9 +709,24 @@ export default function (pi: ExtensionAPI) {
       const cfg = readTopicConfig();
       if (cfg.mode !== "off") {
         turnsSinceTrigger++;
-        const det = detectTopicShift(text, recentInputs);
+        // 检测层 1：embedding（可用则优先）；层 2：词法降级
+        let shift = false;
+        let detail = "";
+        const emb = engine.available
+          ? await engine.detect(text, { zh: cfg.embed.thresholdZh, en: cfg.embed.thresholdEn })
+          : null;
+        if (emb) {
+          shift = emb.shift;
+          detail = `语义相似度 ${emb.similarity.toFixed(3)}`;
+        } else {
+          const lex = detectTopicShift(text, recentInputs);
+          // 词法降级护栏：纯中文消息词法覆盖率实测误判率高（同话题措辞改写 cov=0），不信任
+          shift = lex.shift && /[a-z]{3,}/i.test(text);
+          detail = `词法覆盖率 ${lex.coverage.toFixed(2)}`;
+          if (!engine.available) maybeGuide(ctx); // 未就绪 → 触发懒引导/静默补初始化
+        }
         const eligible =
-          det.shift &&
+          shift &&
           recentInputs.length >= 2 &&
           turnsSinceTrigger > cfg.cooldownTurns;
         if (eligible) {
@@ -505,21 +735,31 @@ export default function (pi: ExtensionAPI) {
           if (tokens !== null && tokens >= cfg.minTokens) {
             turnsSinceTrigger = 0;
             if (cfg.mode === "auto" && typeof ctx.compact === "function") {
-              ctx.compact({
-                customInstructions: AUTO_COMPACT_INSTRUCTIONS,
-                onError: (e: any) => {
-                  try {
-                    ctx.ui.notify(`🌀 自动压缩失败: ${e?.message ?? e}`, "warning");
-                  } catch {}
-                },
-              });
-              ctx.ui.notify(
-                `🌀 疑似话题切换（覆盖率 ${det.coverage.toFixed(2)}），已自动压缩旧话题上下文（${tokens} tokens）`,
-                "info",
-              );
+              // auto：LLM 二次确认后才压缩（不可逆操作必造可靠依据）
+              ctx.ui.notify("🌀 疑似话题切换，正在确认...", "info");
+              const confirmed = await llmConfirmShift(ctx, recentInputs.slice(-3), text);
+              if (confirmed === true) {
+                ctx.compact({
+                  customInstructions: AUTO_COMPACT_INSTRUCTIONS,
+                  onError: (e: any) => {
+                    try {
+                      ctx.ui.notify(`🌀 自动压缩失败: ${e?.message ?? e}`, "warning");
+                    } catch {}
+                  },
+                });
+                ctx.ui.notify(
+                  `🌀 已确认话题切换（${detail}），自动压缩旧话题上下文（${tokens} tokens）`,
+                  "info",
+                );
+              } else {
+                ctx.ui.notify(
+                  `🌀 疑似话题切换（${detail}），但 LLM 确认未通过/不可用，未压缩。可手动 /compact`,
+                  "info",
+                );
+              }
             } else {
               ctx.ui.notify(
-                `🌀 新问题似乎与近期工作关联不大（疑似话题切换），当前上下文 ${tokens} tokens。` +
+                `🌀 新问题似乎与近期工作关联不大（疑似话题切换，${detail}），当前上下文 ${tokens} tokens。` +
                   `可执行 /compact 压缩旧话题（结论保留在摘要中，随时可召回）；` +
                   `如需自动压缩，在 settings.json 配置 carryover.topicCompact.mode="auto"`,
                 "info",
@@ -528,6 +768,7 @@ export default function (pi: ExtensionAPI) {
           }
         }
       }
+      await engine.observe(text); // 语义窗口积累（引擎就绪后增量算向量，2ms）
       recentInputs.push(text);
       if (recentInputs.length > TOPIC_WINDOW) recentInputs.shift();
     } catch {
@@ -536,10 +777,11 @@ export default function (pi: ExtensionAPI) {
     return { action: "continue" };
   });
 
-  // 6) 压缩即沉淀：每次压缩成功后归档摘要，并重置话题窗口
+  // 6) 压缩即沉淀：每次压缩成功后归档摘要，并重置话题窗口（语义+词法）
   pi.on("session_compact", async (event: any, ctx: any) => {
     recentInputs = [];
     turnsSinceTrigger = 0;
+    engine.resetWindow();
     try {
       const cfg = readTopicConfig();
       if (!cfg.archive) return;
@@ -554,10 +796,48 @@ export default function (pi: ExtensionAPI) {
 
   // 7) /carryover 命令
   pi.registerCommand("carryover", {
-    description: "工作承接：/carryover 查看 | save 手动生成 | clear 清空 | topics 话题归档",
+    description: "工作承接：/carryover 查看 | save 手动生成 | clear 清空 | topics 话题归档 | embed 语义检测管理",
     handler: async (args: string, ctx: any) => {
       const sub = (args || "").trim().split(/\s+/)[0]?.toLowerCase();
       const p = carryoverPath(ctx.cwd);
+
+      if (sub === "embed") {
+        const cfg = readTopicConfig();
+        const arg = (args || "").trim().split(/\s+/)[1]?.toLowerCase() ?? "";
+        if (arg === "reset") {
+          writeEmbedConfig({ choice: undefined, resolvedEndpoint: undefined });
+          ctx.ui.notify("已重置语义检测选择（下次需要时重新引导）", "info");
+          return;
+        }
+        if (arg === "on" || arg === "auto" || arg === "zh" || arg === "en") {
+          const wanted = arg === "on" ? (cfg.embed.choice ?? "auto") : arg;
+          const choice: "auto" | "zh" | "en" = wanted === "off" ? "auto" : wanted;
+          writeEmbedConfig({ choice });
+          ctx.ui.notify(`🌀 开始下载语义模型（${choice}）...`, "info");
+          settingUp ??= setupEmbed(ctx, choice).then(() => {});
+          await settingUp;
+          return;
+        }
+        if (arg === "off") {
+          writeEmbedConfig({ choice: "off" });
+          ctx.ui.notify("已关闭语义检测（词法降级）", "info");
+          return;
+        }
+        const status = engine.available
+          ? `✅ 就绪（${cfg.embed.choice ?? "auto"}，窗口向量已积累）`
+          : settingUp
+            ? "⏳ 下载/初始化中..."
+            : cfg.embed.choice === "off"
+              ? "❌ 已关闭（词法降级）"
+              : cfg.embed.choice
+                ? "⚠️ 已选择但未就绪（/carryover embed on 重试）"
+                : "❔ 未启用（首次需要时自动引导，或 /carryover embed on）";
+        ctx.ui.notify(
+          `话题语义检测：${status}\n检测方式：${engine.available ? "embedding（语言路由双小模型）" : "词法降级"} · 下载源：${cfg.embed.endpoint ?? cfg.embed.resolvedEndpoint ?? "自动探测"}\n命令：/carryover embed on|auto|zh|en|off|reset`,
+          "info",
+        );
+        return;
+      }
 
       if (sub === "topics") {
         const list = listTopicArchives(ctx.cwd);

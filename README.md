@@ -11,7 +11,9 @@
 
 Every project gets a `<cwd>/.pi/CARRYOVER.md` holding **only unfinished work** (TODOs, key decisions, blockers, next steps — completed items are always dropped). It's injected into the system prompt at every session start, per project directory.
 
-**v1.1 — Topic compaction**: pi's built-in compaction only fires when the context is about to overflow (volume-driven, arbitrary cut point). pi-carryover watches every input and, when your new question drifts from the recent topic, suggests — or performs, opt-in — compacting at that natural boundary, and archives every compaction summary under `.pi/topics/` for later recall. Zero-LLM detection, zero extra API cost. See [Topic compaction (v1.1)](#topic-compaction-v11).
+**v1.1 — Topic compaction**: pi's built-in compaction only fires when the context is about to overflow (volume-driven, arbitrary cut point). pi-carryover watches every input and, when your new question drifts from the recent topic, suggests — or performs, opt-in — compacting at that natural boundary, and archives every compaction summary under `.pi/topics/` for later recall. See [Topic compaction](#topic-compaction-v11--semantic-detection-v112).
+
+**v1.1.2 — Semantic detection**: lexical coverage misjudged Chinese paraphrases (same-topic rewording scored 0 overlap); detection now runs on tiny local embedding models, language-routed (`bge-small-zh` 23MB + `MiniLM` 23MB, ~2ms/message, fully offline after download, auto hf-mirror.com fallback for CN networks, lazy onboarding — nothing downloads until first use). Benchmarked 28/28 on Chinese & English same/diff-topic pairs.
 
 ## Install
 
@@ -96,15 +98,19 @@ Notes on the recurring cost:
 
 **Session linkage** — on every save, the current session file path is recorded to `.pi/.carryover-session`; on startup it's injected alongside the notes, so the agent can point you to `/resume` when full-history detail is needed. pi's sessions are the *data layer*; this extension is the *state layer*.
 
-## Topic compaction (v1.1)
+## Topic compaction (v1.1) — semantic detection (v1.1.2)
 
 pi's built-in compaction is **volume-driven**: it fires only when the context is about to overflow, cutting at an arbitrary point mid-work. This extension adds **semantic timing**: it detects when your new question is unrelated to the recent topic and suggests (or performs, opt-in) compaction at that natural boundary — the best possible moment, with the best possible instructions.
 
-- **Zero-LLM detection** — each interactive input is tokenized (latin words + CJK bigrams, stopwords filtered) and compared against a rolling window of recent messages; coverage below ~12% is treated as a topic shift. No extra API calls, no latency.
-- **Guardrails** — a context floor (`minTokens`, default 40k: tiny contexts aren't worth compacting), a turn cooldown (default 3), short messages and mid-stream interrupts are skipped, detection never touches the input pipeline.
-- **suggest mode (default)** — notifies you with current token count; you decide whether to `/compact`.
-- **auto mode (opt-in)** — calls compaction directly with instructions to fully preserve the old topic's conclusions/decisions/file state in the summary.
-- **Compaction = carryover** — every compaction summary (manual, threshold, or topic-triggered) is archived to `<project>/.pi/topics/` so old topics remain recallable. `fromExtension` summaries too.
+- **Embedding-based detection (v1.1.2)** — each message is embedded by a tiny local model and compared (cosine similarity against a rolling window of recent messages). v1.1's pure lexical coverage metric systematically misjudged Chinese paraphrases (same-topic rewording scored 0 overlap); semantic similarity fixes that: benchmarked 28/28 correct across Chinese & English same/diff-topic pairs.
+- **Language-routed dual models** — CJK-dominant messages route to `bge-small-zh-v1.5` (23MB), latin-dominant to `all-MiniLM-L6-v2` (23MB). Each language gets a model actually trained for it; total download 46MB, inference ~2ms/message on CPU, fully offline after download. (A single multilingual model tested worse on both languages and was rejected.)
+- **Lazy onboarding** — nothing downloads at install time. The first time detection is actually needed, an interactive picker appears (both models / zh only / en only / skip). The choice persists in settings.json; download progress shows in the status bar.
+- **Resilient downloader** — HF endpoint is auto-probed (official → hf-mirror.com for CN networks); files download with HTTP Range resume (curl -C - equivalent, 5 retries) because HF CDN connections do drop on flaky networks. transformers.js's own fetcher has no resume — this downloader bypasses it; the runtime never touches the network.
+- **Graceful degradation** — models unavailable (no network / skipped)? Lexical detection remains as fallback, but pure-CJK messages skip it (measured 100% false positives); latin-technical chats keep full coverage.
+- **Guardrails** — context floor (`minTokens`, default 40k), turn cooldown (default 3), short messages & mid-stream interrupts skipped, failures never touch the input pipeline.
+- **suggest mode (default)** — notifies with similarity score + token count; you decide whether to `/compact`.
+- **auto mode (opt-in)** — an LLM yes/no double-confirm gates the irreversible compaction; only confirmed topic shifts trigger `ctx.compact()` with instructions to fully preserve the old topic's conclusions/decisions/file state.
+- **Compaction = carryover** — every compaction summary is archived to `<project>/.pi/topics/`, capped at 50.
 
 ```jsonc
 // ~/.pi/agent/settings.json
@@ -113,7 +119,13 @@ pi's built-in compaction is **volume-driven**: it fires only when the context is
     "mode": "suggest",    // "off" | "suggest" | "auto"
     "minTokens": 40000,
     "cooldownTurns": 3,
-    "archive": true
+    "archive": true,
+    "embed": {                       // v1.1.2 semantic detection
+      "choice": "auto",             // "auto" | "zh" | "en" | "off" (omit → lazy onboarding)
+      "thresholdZh": 0.40,          // optional overrides (bench defaults)
+      "thresholdEn": 0.115,
+      "endpoint": ""                // optional download source override
+    }
   }
 }
 ```
@@ -126,6 +138,7 @@ pi's built-in compaction is **volume-driven**: it fires only when the context is
 | `/carryover save` | Manually generate an LLM summary now |
 | `/carryover clear` | Clear the notes |
 | `/carryover topics` | List topic compaction archives |
+| `/carryover embed` | Semantic detection status / `on\|auto\|zh\|en\|off\|reset` |
 
 ```
 <project>/.pi/CARRYOVER.md        # the notes (markdown, human-editable, git-committable)
@@ -141,7 +154,9 @@ pi's built-in compaction is **volume-driven**: it fires only when the context is
 
 每个项目目录维护一份 `<cwd>/.pi/CARRYOVER.md`,**只保留未完成的工作**(待办、关键决策、卡点、下一步 —— 已完成的事项永远会被删掉)。每次会话启动自动注入 system prompt,按项目目录隔离。
 
-**v1.1 新增 —— 话题压缩**：pi 内建 compaction 只在上下文快溢出时才触发(体积驱动、切点随机)。pi-carryover 监听每条输入，当新问题与近期话题无关时，在这个自然边界**提示**(或选开**自动**)压缩旧话题上下文，并把每次压缩摘要归档到 `.pi/topics/` 随时可召回。零 LLM 检测、零额外 API 开销。详见[话题压缩 (v1.1)](#话题压缩-v11)。
+**v1.1 新增 —— 话题压缩**：pi 内建 compaction 只在上下文快溢出时才触发(体积驱动、切点随机)。pi-carryover 监听每条输入，当新问题与近期话题无关时，在这个自然边界**提示**(或选开**自动**)压缩旧话题上下文，并把每次压缩摘要归档到 `.pi/topics/` 随时可召回。详见[话题压缩](#话题压缩-v11--语义检测-v112)。
+
+**v1.1.2 —— 语义检测**：词法覆盖率对中文同义改写系统性误判(同话题换个措辞覆盖率就是 0)，改用本地小模型 Embedding 语义相似度检测，按语言路由双小模型(中文 bge-small-zh + 英文 MiniLM 各 23MB，约 2ms/条，下载后完全离线；国内网络自动切 hf-mirror.com；懒引导 —— 安装时零下载，首次使用才选择)。中英文 28 组样本实测全部判对。
 
 ### 安装方式
 
@@ -226,15 +241,19 @@ pi install git:github.com/Feng-H/pi-carryover
 
 **会话联动** —— 每次保存都把当前会话文件路径记到 `.pi/.carryover-session`;启动时与笔记一起注入,agent 需要完整历史细节时会指引你用 `/resume`。pi 自带会话是**数据层**,本扩展是**状态层**。
 
-### 话题压缩 (v1.1)
+### 话题压缩 (v1.1) —— 语义检测 (v1.1.2)
 
 pi 内建的压缩是**体积驱动**的:只在上下文快溢出时才触发,切点落在干活的任意位置。本扩展补上**语义时机**:检测新问题与近期话题无关时,在这个自然边界提示(或选择自动)压缩 —— 最佳时机、最佳指令。
 
-- **零 LLM 检测** —— 每条交互输入分词(拉丁词 + 中文二元组,去停用词),与近期消息窗口比对;覆盖率低于 ~12% 判为话题切换。不额外调 API、零延迟。
-- **护栏** —— 上下文下限(`minTokens` 默认 40k,小上下文不值得压)、轮数冷却(默认 3)、短消息与流式打断跳过;检测异常绝不影响输入链路。
-- **suggest 模式(默认)** —— 提示当前 token 数,由你决定是否 `/compact`。
-- **auto 模式(选开)** —— 直接触发压缩,指令要求完整保留旧话题的结论/决策/文件状态。
-- **压缩即沉淀** —— 每次压缩摘要(手动/阈值/话题触发)都归档到 `<项目>/.pi/topics/`,旧话题随时可召回。
+- **Embedding 语义检测 (v1.1.2)** —— 每条消息用本地小模型向量化,与近期消息窗口算余弦相似度。v1.1 的纯词法覆盖率对中文同义改写系统性误判(同话题措辞一换覆盖率就是 0),语义相似度彻底解决:中英文同/异话题 28 组样本全部判对。
+- **按语言路由双小模型** —— 中文为主的消息走 `bge-small-zh-v1.5`(23MB),英文为主走 `all-MiniLM-L6-v2`(23MB)。各用各的最优模型,总下载 46MB,CPU 推理约 2ms/条,下载后完全离线。(实测单一多语言模型两种语言都更差,弃用。)
+- **懒引导** —— 安装时不下载任何东西。首次真正需要检测时弹交互选择(双模型/仅中文/仅英文/跳过),选择持久化,下载进度显示在状态栏。
+- **抗断下载器** —— 下载源自动探测(官方 → 国内自动切 hf-mirror.com);文件用 HTTP Range 断点续传(curl -C - 等效,重试 5 次),HF CDN 在不稳网络下断连也不怕;绕开 transformers.js 自带的无续传 fetch,运行时零联网。
+- **优雅降级** —— 模型不可用(断网/选择跳过)时回落词法检测,但纯中文消息不再信任词法(实测误判率 100%),拉丁词技术对话保持可用。
+- **护栏** —— 上下文下限(`minTokens` 默认 40k)、轮数冷却(默认 3)、短消息与流式打断跳过;任何失败不影响输入链路。
+- **suggest 模式(默认)** —— 提示相似度 + token 数,由你决定是否 `/compact`。
+- **auto 模式(选开)** —— LLM yes/no 二次确认后才执行不可逆的压缩,指令要求完整保留旧话题的结论/决策/文件状态。
+- **压缩即沉淀** —— 每次压缩摘要都归档到 `<项目>/.pi/topics/`,上限 50 份。
 
 ```jsonc
 // ~/.pi/agent/settings.json
@@ -243,7 +262,13 @@ pi 内建的压缩是**体积驱动**的:只在上下文快溢出时才触发,�
     "mode": "suggest",    // "off" | "suggest" | "auto"
     "minTokens": 40000,
     "cooldownTurns": 3,
-    "archive": true
+    "archive": true,
+    "embed": {                       // v1.1.2 语义检测
+      "choice": "auto",             // "auto" | "zh" | "en" | "off"(不写 → 首次使用时引导)
+      "thresholdZh": 0.40,          // 可选阈值覆盖(默认为基准实测值)
+      "thresholdEn": 0.115,
+      "endpoint": ""                // 可选下载源覆盖
+    }
   }
 }
 ```
@@ -256,6 +281,7 @@ pi 内建的压缩是**体积驱动**的:只在上下文快溢出时才触发,�
 | `/carryover save` | 立即手动生成 LLM 摘要 |
 | `/carryover clear` | 清空笔记 |
 | `/carryover topics` | 查看话题压缩归档 |
+| `/carryover embed` | 语义检测状态 / `on\|auto\|zh\|en\|off\|reset` |
 
 ```
 <project>/.pi/CARRYOVER.md        # 笔记(markdown,人可读可改,可进 git)

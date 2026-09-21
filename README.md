@@ -13,7 +13,7 @@ Every project gets a `<cwd>/.pi/CARRYOVER.md` holding **only unfinished work** (
 
 **v1.1 — Topic compaction**: pi's built-in compaction only fires when the context is about to overflow (volume-driven, arbitrary cut point). pi-carryover watches every input and, when your new question drifts from the recent topic, suggests — or performs, opt-in — compacting at that natural boundary, and archives every compaction summary under `.pi/topics/` for later recall. See [Topic compaction](#topic-compaction-v11--semantic-detection-v112).
 
-**v1.1.2 — Semantic detection**: lexical coverage misjudged Chinese paraphrases (same-topic rewording scored 0 overlap); detection now runs on tiny local embedding models, language-routed (`bge-small-zh` 23MB + `MiniLM` 23MB, ~2ms/message, fully offline after download, auto hf-mirror.com fallback for CN networks, lazy onboarding — nothing downloads until first use). Benchmarked 28/28 on Chinese & English same/diff-topic pairs.
+**v1.1.2 — Semantic detection**: lexical coverage misjudged Chinese paraphrases (same-topic rewording scored 0 overlap); detection now runs on tiny local embedding models, language-routed (`bge-small-zh` 23MB + `MiniLM` 23MB, ~2ms/message, fully offline after download, auto hf-mirror.com fallback for CN networks). Benchmarked 28/28 on Chinese & English same/diff-topic pairs. **v1.1.3**: enabled by default (installs = full features; models download silently in background on first use, disable via `/carryover embed off`) and bilingual UI (prompts follow your input language).
 
 ## Install
 
@@ -104,7 +104,7 @@ pi's built-in compaction is **volume-driven**: it fires only when the context is
 
 - **Embedding-based detection (v1.1.2)** — each message is embedded by a tiny local model and compared (cosine similarity against a rolling window of recent messages). v1.1's pure lexical coverage metric systematically misjudged Chinese paraphrases (same-topic rewording scored 0 overlap); semantic similarity fixes that: benchmarked 28/28 correct across Chinese & English same/diff-topic pairs.
 - **Language-routed dual models** — CJK-dominant messages route to `bge-small-zh-v1.5` (23MB), latin-dominant to `all-MiniLM-L6-v2` (23MB). Each language gets a model actually trained for it; total download 46MB, inference ~2ms/message on CPU, fully offline after download. (A single multilingual model tested worse on both languages and was rejected.)
-- **Lazy onboarding** — nothing downloads at install time. The first time detection is actually needed, an interactive picker appears (both models / zh only / en only / skip). The choice persists in settings.json; download progress shows in the status bar.
+- **Enabled by default (v1.1.3)** — installing the extension means full features: nothing downloads at install time, but on first use the models download silently in the background (progress in the status bar, one notification with an opt-out hint). Disable anytime via `/carryover embed off` or settings.json.
 - **Resilient downloader** — HF endpoint is auto-probed (official → hf-mirror.com for CN networks); files download with HTTP Range resume (curl -C - equivalent, 5 retries) because HF CDN connections do drop on flaky networks. transformers.js's own fetcher has no resume — this downloader bypasses it; the runtime never touches the network.
 - **Graceful degradation** — models unavailable (no network / skipped)? Lexical detection remains as fallback, but pure-CJK messages skip it (measured 100% false positives); latin-technical chats keep full coverage.
 - **Guardrails** — context floor (`minTokens`, default 40k), turn cooldown (default 3), short messages & mid-stream interrupts skipped, failures never touch the input pipeline.
@@ -121,7 +121,7 @@ pi's built-in compaction is **volume-driven**: it fires only when the context is
     "cooldownTurns": 3,
     "archive": true,
     "embed": {                       // v1.1.2 semantic detection
-      "choice": "auto",             // "auto" | "zh" | "en" | "off" (omit → lazy onboarding)
+      "choice": "auto",             // "auto" (default) | "zh" | "en" | "off"
       "thresholdZh": 0.40,          // optional overrides (bench defaults)
       "thresholdEn": 0.115,
       "endpoint": ""                // optional download source override
@@ -156,7 +156,7 @@ pi's built-in compaction is **volume-driven**: it fires only when the context is
 
 **v1.1 新增 —— 话题压缩**：pi 内建 compaction 只在上下文快溢出时才触发(体积驱动、切点随机)。pi-carryover 监听每条输入，当新问题与近期话题无关时，在这个自然边界**提示**(或选开**自动**)压缩旧话题上下文，并把每次压缩摘要归档到 `.pi/topics/` 随时可召回。详见[话题压缩](#话题压缩-v11--语义检测-v112)。
 
-**v1.1.2 —— 语义检测**：词法覆盖率对中文同义改写系统性误判(同话题换个措辞覆盖率就是 0)，改用本地小模型 Embedding 语义相似度检测，按语言路由双小模型(中文 bge-small-zh + 英文 MiniLM 各 23MB，约 2ms/条，下载后完全离线；国内网络自动切 hf-mirror.com；懒引导 —— 安装时零下载，首次使用才选择)。中英文 28 组样本实测全部判对。
+**v1.1.2 —— 语义检测**：词法覆盖率对中文同义改写系统性误判(同话题换个措辞覆盖率就是 0)，改用本地小模型 Embedding 语义相似度检测，按语言路由双小模型(中文 bge-small-zh + 英文 MiniLM 各 23MB，约 2ms/条，下载后完全离线；国内网络自动切 hf-mirror.com)。中英文 28 组样本实测全部判对。**v1.1.3**:默认启用(装了扩展即全功能，首次使用时后台静默下载，`/carryover embed off` 可关闭)+ 提示文案跟随输入语言(中/英双语)。
 
 ### 安装方式
 
@@ -264,7 +264,7 @@ pi 内建的压缩是**体积驱动**的:只在上下文快溢出时才触发,�
     "cooldownTurns": 3,
     "archive": true,
     "embed": {                       // v1.1.2 语义检测
-      "choice": "auto",             // "auto" | "zh" | "en" | "off"(不写 → 首次使用时引导)
+      "choice": "auto",             // "auto"(默认) | "zh" | "en" | "off"
       "thresholdZh": 0.40,          // 可选阈值覆盖(默认为基准实测值)
       "thresholdEn": 0.115,
       "endpoint": ""                // 可选下载源覆盖

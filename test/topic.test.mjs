@@ -64,7 +64,7 @@ test("readTopicConfig：默认值 / 覆盖 / 损坏配置回落", () => {
       minTokens: 40000,
       cooldownTurns: 3,
       archive: true,
-      embed: { choice: undefined },
+      embed: { choice: "auto" },
     });
     // 覆盖
     fs.mkdirSync(dir, { recursive: true });
@@ -107,7 +107,7 @@ test("v1.1.2 readTopicConfig/writeEmbedConfig：embed 节解析与原子持久�
   process.env.PI_CARRYOVER_DIR = dir;
   try {
     let cfg = readTopicConfig();
-    assert.equal(cfg.embed.choice, undefined); // 未选择 → 懒引导
+    assert.equal(cfg.embed.choice, "auto"); // 默认启用
     writeEmbedConfig({ choice: "auto", resolvedEndpoint: "https://hf-mirror.com" });
     cfg = readTopicConfig();
     assert.equal(cfg.embed.choice, "auto");

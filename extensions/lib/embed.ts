@@ -11,7 +11,8 @@
 
 export interface EmbedModelSpec {
   id: string; // HF repo
-  label: string;
+  label: string; // 中文名（zh 文案）
+  labelEn: string; // 英文名（en 文案）
   sizeMB: number;
   threshold: number; // avg 余弦低于此值 → 疑似话题切换
   files: string[]; // 预下载清单（transformers.js 缓存布局）
@@ -21,6 +22,7 @@ export const EMBED_MODELS: Record<"zh" | "en", EmbedModelSpec> = {
   zh: {
     id: "Xenova/bge-small-zh-v1.5",
     label: "中文优化 bge-small-zh",
+    labelEn: "bge-small-zh (Chinese)",
     sizeMB: 23,
     threshold: 0.4,
     files: ["config.json", "tokenizer.json", "tokenizer_config.json", "onnx/model_quantized.onnx"],
@@ -28,6 +30,7 @@ export const EMBED_MODELS: Record<"zh" | "en", EmbedModelSpec> = {
   en: {
     id: "Xenova/all-MiniLM-L6-v2",
     label: "英文优化 MiniLM",
+    labelEn: "MiniLM (English)",
     sizeMB: 23,
     threshold: 0.115,
     files: [

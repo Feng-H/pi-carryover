@@ -810,8 +810,8 @@ export default function (pi: ExtensionAPI) {
         const cfg = readTopicConfig();
         const arg = (args || "").trim().split(/\s+/)[1]?.toLowerCase() ?? "";
         if (arg === "reset") {
-          writeEmbedConfig({ choice: undefined, resolvedEndpoint: undefined });
-          ctx.ui.notify("已重置语义检测选择（下次需要时重新引导）", "info");
+          writeEmbedConfig({ choice: "auto", resolvedEndpoint: undefined });
+          ctx.ui.notify("已重置为默认（auto，首次使用时自动下载）/ Reset to default (auto)", "info");
           return;
         }
         if (arg === "on" || arg === "auto" || arg === "zh" || arg === "en") {

@@ -98,11 +98,12 @@ Notes on the recurring cost:
 
 **Session linkage** — on every save, the current session file path is recorded to `.pi/.carryover-session`; on startup it's injected alongside the notes, so the agent can point you to `/resume` when full-history detail is needed. pi's sessions are the *data layer*; this extension is the *state layer*.
 
-## Topic compaction (v1.1) — semantic detection (v1.1.2)
+## Topic compaction (v1.1) — semantic detection (v1.1.2) — adaptive threshold (v1.2.0)
 
 pi's built-in compaction is **volume-driven**: it fires only when the context is about to overflow, cutting at an arbitrary point mid-work. This extension adds **semantic timing**: it detects when your new question is unrelated to the recent topic and suggests (or performs, opt-in) compaction at that natural boundary — the best possible moment, with the best possible instructions.
 
 - **Embedding-based detection (v1.1.2)** — each message is embedded by a tiny local model and compared (cosine similarity against a rolling window of recent messages). v1.1's pure lexical coverage metric systematically misjudged Chinese paraphrases (same-topic rewording scored 0 overlap); semantic similarity fixes that: benchmarked 28/28 correct across Chinese & English same/diff-topic pairs.
+- **Adaptive threshold (v1.2.0)** — the fixed benchmark thresholds (zh 0.4 / en 0.115) misjudge **register drift**: terse conversational styles (short colloquial messages) score systematically lower similarity, so a same-topic “好的 我试试” measured 0.389 < 0.4 → false "topic shift". The engine now tracks this conversation's own same-topic similarity history (rolling 8) and sets `threshold = clamp(min(hist) − 0.05, floor, cap)` (zh [0.15, 0.55], en [0.03, 0.25]) — cold start (<3 samples) and explicit overrides stay on the fixed value, so v1.1.x behavior is fully preserved. In auto mode, when the LLM double-confirm *rejects* a suspected shift, the similarity feeds back (`markSame`) and the threshold self-heals downward. Calibration note: adjacent technical topics (React → npm 403) are **not separable** at message level (same-topic [0.415..0.491] overlaps adjacent [0.391..0.538]) — that ambiguity is deliberately left to the LLM confirm layer, not the threshold.
 - **Language-routed dual models** — CJK-dominant messages route to `bge-small-zh-v1.5` (23MB), latin-dominant to `all-MiniLM-L6-v2` (23MB). Each language gets a model actually trained for it; total download 46MB, inference ~2ms/message on CPU, fully offline after download. (A single multilingual model tested worse on both languages and was rejected.)
 - **Enabled by default (v1.1.3)** — installing the extension means full features: nothing downloads at install time, but on first use the models download silently in the background (progress in the status bar, one notification with an opt-out hint). Disable anytime via `/carryover embed off` or settings.json.
 - **Resilient downloader** — HF endpoint is auto-probed (official → hf-mirror.com for CN networks); files download with HTTP Range resume (curl -C - equivalent, 5 retries) because HF CDN connections do drop on flaky networks. transformers.js's own fetcher has no resume — this downloader bypasses it; the runtime never touches the network.
@@ -122,8 +123,8 @@ pi's built-in compaction is **volume-driven**: it fires only when the context is
     "archive": true,
     "embed": {                       // v1.1.2 semantic detection
       "choice": "auto",             // "auto" (default) | "zh" | "en" | "off"
-      "thresholdZh": 0.40,          // optional overrides (bench defaults)
-      "thresholdEn": 0.115,
+      "thresholdZh": 0.40,          // explicit override ⇒ fixed threshold, adaptive off
+      "thresholdEn": 0.115,         // (omit both ⇒ v1.2.0 adaptive threshold)
       "endpoint": ""                // optional download source override
     }
   }
@@ -241,11 +242,12 @@ pi install git:github.com/Feng-H/pi-carryover
 
 **会话联动** —— 每次保存都把当前会话文件路径记到 `.pi/.carryover-session`;启动时与笔记一起注入,agent 需要完整历史细节时会指引你用 `/resume`。pi 自带会话是**数据层**,本扩展是**状态层**。
 
-### 话题压缩 (v1.1) —— 语义检测 (v1.1.2)
+### 话题压缩 (v1.1) —— 语义检测 (v1.1.2) —— 自适应阈值 (v1.2.0)
 
 pi 内建的压缩是**体积驱动**的:只在上下文快溢出时才触发,切点落在干活的任意位置。本扩展补上**语义时机**:检测新问题与近期话题无关时,在这个自然边界提示(或选择自动)压缩 —— 最佳时机、最佳指令。
 
 - **Embedding 语义检测 (v1.1.2)** —— 每条消息用本地小模型向量化,与近期消息窗口算余弦相似度。v1.1 的纯词法覆盖率对中文同义改写系统性误判(同话题措辞一换覆盖率就是 0),语义相似度彻底解决:中英文同/异话题 28 组样本全部判对。
+- **自适应阈值 (v1.2.0)** —— 固定阈值(zh 0.4 / en 0.115)会误判**语域漂移**:简短口语化会话的相似度系统性偏低,同话题的「好的 我试试」实测 0.389 < 0.4 → 被误报「话题切换」。现在引擎跟踪本会话同话题相似度历史(滚动 8 条),`阈值 = clamp(min(历史) − 0.05, floor, cap)`(zh [0.15, 0.55]、en [0.03, 0.25]),双向适配语域;冷启动(<3 条)与显式覆盖时保持固定值,v1.1.x 行为完全兼容。auto 模式下 LLM 二次确认**拒绝**疑似切换时,相似度回填(`markSame`)使阈值下移自愈。标定注记:相邻技术话题(React → npm 403)在消息级**不可分**(同话题 [0.415..0.491] 与相邻 [0.391..0.538] 分布重叠),该歧义刻意留给 LLM 确认层而非阈值。
 - **按语言路由双小模型** —— 中文为主的消息走 `bge-small-zh-v1.5`(23MB),英文为主走 `all-MiniLM-L6-v2`(23MB)。各用各的最优模型,总下载 46MB,CPU 推理约 2ms/条,下载后完全离线。(实测单一多语言模型两种语言都更差,弃用。)
 - **懒引导** —— 安装时不下载任何东西。首次真正需要检测时弹交互选择(双模型/仅中文/仅英文/跳过),选择持久化,下载进度显示在状态栏。
 - **抗断下载器** —— 下载源自动探测(官方 → 国内自动切 hf-mirror.com);文件用 HTTP Range 断点续传(curl -C - 等效,重试 5 次),HF CDN 在不稳网络下断连也不怕;绕开 transformers.js 自带的无续传 fetch,运行时零联网。
@@ -265,8 +267,8 @@ pi 内建的压缩是**体积驱动**的:只在上下文快溢出时才触发,�
     "archive": true,
     "embed": {                       // v1.1.2 语义检测
       "choice": "auto",             // "auto"(默认) | "zh" | "en" | "off"
-      "thresholdZh": 0.40,          // 可选阈值覆盖(默认为基准实测值)
-      "thresholdEn": 0.115,
+      "thresholdZh": 0.40,          // 显式覆盖 ⇒ 固定阈值,自适应关闭
+      "thresholdEn": 0.115,         // (两者均不写 ⇒ v1.2.0 自适应阈值)
       "endpoint": ""                // 可选下载源覆盖
     }
   }

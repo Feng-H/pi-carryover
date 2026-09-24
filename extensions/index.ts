@@ -708,7 +708,11 @@ export default function (pi: ExtensionAPI) {
           : null;
         if (emb) {
           shift = emb.shift;
-          detail = tt(lang, `语义相似度 ${emb.similarity.toFixed(3)}`, `similarity ${emb.similarity.toFixed(3)}`);
+          detail = tt(
+            lang,
+            `语义相似度 ${emb.similarity.toFixed(3)} / 阈值 ${emb.threshold.toFixed(3)}${emb.adaptive ? "（自适应）" : ""}`,
+            `similarity ${emb.similarity.toFixed(3)} / threshold ${emb.threshold.toFixed(3)}${emb.adaptive ? " (adaptive)" : ""}`,
+          );
         } else {
           const lex = detectTopicShift(text, recentInputs);
           // 词法降级护栏：纯中文消息词法覆盖率实测误判率高（同话题措辞改写 cov=0），不信任
@@ -747,6 +751,8 @@ export default function (pi: ExtensionAPI) {
                   "info",
                 );
               } else {
+                // LLM 明确拒绝（false）→ 该消息实为同话题：回填 sim 历史，阈值下移自愈（v1.2.0）
+                if (confirmed === false && emb) engine.markSame(emb.lang, emb.similarity);
                 ctx.ui.notify(
                   tt(
                     lang,

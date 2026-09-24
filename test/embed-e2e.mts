@@ -90,7 +90,7 @@ const cases = {
 let total = 0;
 let passed = 0;
 for (const [lang, groups] of Object.entries(cases)) {
-  console.log(`===== ${lang.toUpperCase()} 判定矩阵（阈值 ${EMBED_MODELS[lang].threshold}）=====`);
+  console.log(`===== ${lang.toUpperCase()} 判定矩阵（冷启动固定阈值 ${EMBED_MODELS[lang].threshold}，案例间重置历史）=====`);
   for (const [kind, list] of Object.entries(groups)) {
     for (const c of list) {
       // 模拟会话：窗口消息逐条 observe（引擎内积累向量）
@@ -101,7 +101,7 @@ for (const [lang, groups] of Object.entries(cases)) {
       const ok = r && r.shift === expectShift;
       if (ok) passed++;
       console.log(
-        `  ${ok ? "✅" : "❌"} ${kind === "same" ? "同话题" : "异话题"} sim=${r?.similarity.toFixed(3)} → shift=${r?.shift}（期望 ${expectShift}） "${c.n.slice(0, 22)}"`,
+        `  ${ok ? "✅" : "❌"} ${kind === "same" ? "同话题" : "异话题"} sim=${r?.similarity.toFixed(3)}/thr=${r?.threshold.toFixed(3)} → shift=${r?.shift}（期望 ${expectShift}） "${c.n.slice(0, 22)}"`,
       );
       engine.resetWindow(); // 案例间隔离（重置窗口）
     }
@@ -113,3 +113,28 @@ console.log(`\n===== 总判定：${passed}/${total} ${passed === total ? "🎯 �
 const t5 = Date.now();
 for (let i = 0; i < 10; i++) await engine.detect("这是一条用于性能采样的消息内容质量检测");
 console.log(`单条 detect 延迟采样: ${((Date.now() - t5) / 10).toFixed(1)}ms/条`);
+
+// ===== 6. v1.2.0 自适应阈值：语域漂移序列验证 =====
+// 简短语域（短句/口语化）sim 系统性偏低，固定 0.4 对同话题「好的 我试试」实测误报；
+// 历史基线自动下探后正确判定 —— 这是 v1.2.0 的核心修复场景。
+console.log(`\n===== 6. 语域漂移序列（v1.2.0 自适应）=====`);
+const terse = ["渲染慢", "列表太长", "虚拟列表", "memo 没用", "key 用错了", "profiler 看下"];
+engine.resetWindow();
+const terseHist: number[] = [];
+for (const m of terse) {
+  const r = await engine.detect(m);
+  if (r && !r.shift) terseHist.push(r.similarity);
+  await engine.observe(m);
+}
+console.log(`  简短语域历史 sim: [${terseHist.map((x) => x.toFixed(3)).join(", ")}]`);
+for (const [kind, text, wantShift] of [
+  ["同话题", "好的 我试试", false],
+  ["异话题", "杭州旅游攻略", true],
+] as const) {
+  const r = await engine.detect(text);
+  const ok = r && r.shift === wantShift;
+  console.log(
+    `  ${ok ? "✅" : "❌"} [${kind}] sim=${r?.similarity.toFixed(3)} thr=${r?.threshold.toFixed(3)}${r?.adaptive ? "(自适应)" : ""} → shift=${r?.shift}（期望 ${wantShift}） "${text}"`,
+  );
+}
+engine.resetWindow();

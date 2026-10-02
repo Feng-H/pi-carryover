@@ -71,14 +71,14 @@ function readCarryover(cwd: string): string | null {
 
 // 原子写：先写临时文件再 rename（rename 同一文件系统上原子），避免写入中途崩溃留下半截文件。
 // 思想来源：Pi Durable 的 checkpoint 事务写模式。
-function atomicWriteText(p: string, content: string): void {
+export function atomicWriteText(p: string, content: string): void {
   fs.mkdirSync(path.dirname(p), { recursive: true });
   const tmp = `${p}.tmp.${process.pid}`;
   fs.writeFileSync(tmp, content, "utf8");
   fs.renameSync(tmp, p);
 }
 
-function writeCarryover(cwd: string, content: string): void {
+export function writeCarryover(cwd: string, content: string): void {
   atomicWriteText(carryoverPath(cwd), content);
   appendCarryoverLog(cwd, content);
 }
@@ -88,12 +88,13 @@ function writeCarryover(cwd: string, content: string): void {
 // 事实序列存在 carryover.log 里，误删/写坏时可人工回放找回。
 
 const LOG_FILE = "carryover.log";
+export const LOG_ROTATE_BYTES = 1_000_000; // 超过 1MB 轮转（回放找回只需要近期历史）
 
 function carryoverLogPath(cwd: string): string {
   return path.join(cwd, STORE_DIR, LOG_FILE);
 }
 
-function appendCarryoverLog(cwd: string, content: string): void {
+export function appendCarryoverLog(cwd: string, content: string): void {
   try {
     const p = carryoverLogPath(cwd);
     const entry = [
@@ -103,6 +104,15 @@ function appendCarryoverLog(cwd: string, content: string): void {
       "```",
       "",
     ].join("\n");
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    // 简单轮转：旧日志改名 .1（覆盖更旧的），防止无上限增长；轮转失败不影响追加
+    try {
+      if (fs.existsSync(p) && fs.statSync(p).size > LOG_ROTATE_BYTES) {
+        fs.renameSync(p, `${p}.1`);
+      }
+    } catch {
+      /* ignore */
+    }
     fs.appendFileSync(p, entry, "utf8");
   } catch {
     /* 日志是尽力而为的附加物，绝不影响主写入 */

@@ -148,7 +148,7 @@ pi's built-in compaction is **volume-driven**: it fires only when the context is
 
 ```
 <project>/.pi/CARRYOVER.md        # the notes (markdown, human-editable, git-committable)
-<project>/.pi/carryover.log       # append-only event log (v1.2.1, replay source)
+<project>/.pi/carryover.log       # append-only event log (v1.2.1, replay source, rotated at 1MB)
 <project>/.pi/.carryover-session  # last session file path (for /resume linkage)
 <project>/.pi/topics/             # topic compaction archives (v1.1, capped at 50)
 ```
@@ -298,7 +298,7 @@ pi 内建的压缩是**体积驱动**的:只在上下文快溢出时才触发,�
 
 ```
 <project>/.pi/CARRYOVER.md        # 笔记(markdown,人可读可改,可进 git)
-<project>/.pi/carryover.log       # 追加式事件日志(v1.2.1,可回放找回)
+<project>/.pi/carryover.log       # 追加式事件日志(v1.2.1,可回放找回,1MB 自动轮转)
 <project>/.pi/.carryover-session  # 最近会话文件路径(供 /resume 联动)
 <project>/.pi/topics/             # 话题压缩归档(v1.1,上限 50 份)
 ```

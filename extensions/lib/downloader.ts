@@ -98,10 +98,11 @@ export async function downloadFileResumable(
       }
       if (resp.status === 200) {
         const total = Number(resp.headers.get("content-length")) || 0;
+        // 服务器不支持 Range → 丢弃已有半成品，从头重写（进度 0→total）
         if (!fs.existsSync(dest)) fs.mkdirSync(path.dirname(dest), { recursive: true });
-        const fh = fs.createWriteStream(dest, { flags: have > 0 ? "w" : "w" }); // 服务器不支持 Range → 重写
+        const fh = fs.createWriteStream(dest, { flags: "w" });
         let bytes = 0;
-        onProgress({ file: path.basename(dest), bytes: have + total, total: have + total });
+        onProgress({ file: path.basename(dest), bytes: 0, total });
         for await (const chunk of resp.body!) {
           fh.write(chunk);
           bytes += chunk.length;
@@ -131,11 +132,10 @@ export async function ensureModelFiles(
   cacheDir: string,
   onProgress: (p: DownloadProgress & { model: string }) => void,
 ): Promise<boolean> {
-  const base = path.join(cacheDir, "models--" + modelId.replace("/", "--"));
-  // transformers.js 缓存布局：<cacheDir>/<org>/<model>/<file>
+  // transformers.js 缓存布局：<cacheDir>/<org>/<model>/<file>（v4 FileCache 用
+  // proposedCacheKey = pathJoin(model_id, filename) 直接 join 到 cacheDir）
   const [org, name] = modelId.split("/");
   const dir = path.join(cacheDir, org, name);
-  void base;
 
   // 先看已齐没齐（离线快速路径）
   if (files.every((f) => fs.existsSync(path.join(dir, f)))) return true;

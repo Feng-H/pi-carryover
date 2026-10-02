@@ -150,7 +150,10 @@ export class EmbedEngine {
     try {
       if (!this.tf) {
         this.tf = await import("@huggingface/transformers");
-        this.tf.env.localModelOnly = true; // 预下载器负责网络，运行时零网络
+        // v4 无 env.localModelOnly（v3 遗留名）。禁远端 = 缓存缺文件时快速失败（init 捕获 →
+        // 词法降级），而不是绕过镜像探测直连 huggingface.co 挂死。预下载器负责全部网络，
+        // 运行时零网络。注意不能同时设 allowLocalModels=false（v4 视为非法配置直接抛错）。
+        this.tf.env.allowRemoteModels = false;
         if (this.cacheDir) this.tf.env.cacheDir = this.cacheDir;
       }
     } catch {

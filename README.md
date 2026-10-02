@@ -15,6 +15,11 @@ Every project gets a `<cwd>/.pi/CARRYOVER.md` holding **only unfinished work** (
 
 **v1.1.2 — Semantic detection**: lexical coverage misjudged Chinese paraphrases (same-topic rewording scored 0 overlap); detection now runs on tiny local embedding models, language-routed (`bge-small-zh` 23MB + `MiniLM` 23MB, ~2ms/message, fully offline after download, auto hf-mirror.com fallback for CN networks). Benchmarked 28/28 on Chinese & English same/diff-topic pairs. **v1.1.3**: enabled by default (installs = full features; models download silently in background on first use, disable via `/carryover embed off`) and bilingual UI (prompts follow your input language).
 
+**v1.2.1 — Durable-inspired write hardening**: three reliability upgrades borrowed from [Pi Durable](https://earendil.com/posts/pi-durable/)'s engineering philosophy, implemented the lightweight extension way (no new APIs, no process-lifetime hooks):
+1. **Atomic writes** (from Durable's checkpoint transactions) — all state files (`CARRYOVER.md`, `.carryover-session`, topic archives) now write via temp-file + rename, so a crash mid-write can never leave a half-written file behind.
+2. **Append-only event log** (from Durable's transcript-as-source-of-truth) — every save is also appended to `<project>/.pi/carryover.log`; `CARRYOVER.md` is just the latest view, so a bad LLM summary or an accidental deletion can always be replayed/recovered from the log.
+3. **Incompleteness marker on fallback** (from Durable's aborted-task marking) — when the fallback extractor runs (LLM unavailable/timeout) and the session had more messages than the capture window, the note now explicitly tells the model the record is partial ("covers last N of M messages — use as clues only"), so the next session won't mistake a truncated record for full context.
+
 ## Install
 
 Install via **npm** (recommended):
@@ -143,6 +148,7 @@ pi's built-in compaction is **volume-driven**: it fires only when the context is
 
 ```
 <project>/.pi/CARRYOVER.md        # the notes (markdown, human-editable, git-committable)
+<project>/.pi/carryover.log       # append-only event log (v1.2.1, replay source)
 <project>/.pi/.carryover-session  # last session file path (for /resume linkage)
 <project>/.pi/topics/             # topic compaction archives (v1.1, capped at 50)
 ```
@@ -158,6 +164,11 @@ pi's built-in compaction is **volume-driven**: it fires only when the context is
 **v1.1 新增 —— 话题压缩**：pi 内建 compaction 只在上下文快溢出时才触发(体积驱动、切点随机)。pi-carryover 监听每条输入，当新问题与近期话题无关时，在这个自然边界**提示**(或选开**自动**)压缩旧话题上下文，并把每次压缩摘要归档到 `.pi/topics/` 随时可召回。详见[话题压缩](#话题压缩-v11--语义检测-v112)。
 
 **v1.1.2 —— 语义检测**：词法覆盖率对中文同义改写系统性误判(同话题换个措辞覆盖率就是 0)，改用本地小模型 Embedding 语义相似度检测，按语言路由双小模型(中文 bge-small-zh + 英文 MiniLM 各 23MB，约 2ms/条，下载后完全离线；国内网络自动切 hf-mirror.com)。中英文 28 组样本实测全部判对。**v1.1.3**:默认启用(装了扩展即全功能，首次使用时后台静默下载，`/carryover embed off` 可关闭)+ 提示文案跟随输入语言(中/英双语)。
+
+**v1.2.1 —— 参考 Pi Durable 的写入加固**：借鉴 [Pi Durable](https://earendil.com/posts/pi-durable/) 的工程思想做了三项可靠性升级，但保持 extension 的轻量实现方式(不加新 API、不碰进程生命周期钩子)：
+1. **原子写**(取自 Durable 的 checkpoint 事务写)——所有状态文件(`CARRYOVER.md`、`.carryover-session`、话题归档)改为"临时文件 + rename"写入，写入中途崩溃也不会留下半截文件。
+2. **追加式事件日志**(取自 Durable 的 transcript 即事实源)——每次保存同时追加到 `<项目>/.pi/carryover.log`;`CARRYOVER.md` 只是最新视图，摘要写坏或误删都能从日志回放找回。
+3. **降级记录的完整性标记**(取自 Durable 对被打断任务的 aborted 标记)——当 LLM 不可用走降级抓取、且本次会话消息数超过抓取窗口时，笔记会明确告诉模型"本记录仅覆盖最近 N 条(共 M 条)，只作线索、勿当完整上下文"，避免下个会话把截断记录当成全貌。
 
 ### 安装方式
 
@@ -287,6 +298,7 @@ pi 内建的压缩是**体积驱动**的:只在上下文快溢出时才触发,�
 
 ```
 <project>/.pi/CARRYOVER.md        # 笔记(markdown,人可读可改,可进 git)
+<project>/.pi/carryover.log       # 追加式事件日志(v1.2.1,可回放找回)
 <project>/.pi/.carryover-session  # 最近会话文件路径(供 /resume 联动)
 <project>/.pi/topics/             # 话题压缩归档(v1.1,上限 50 份)
 ```

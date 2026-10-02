@@ -69,10 +69,44 @@ function readCarryover(cwd: string): string | null {
   return null;
 }
 
-function writeCarryover(cwd: string, content: string): void {
-  const p = carryoverPath(cwd);
+// 原子写：先写临时文件再 rename（rename 同一文件系统上原子），避免写入中途崩溃留下半截文件。
+// 思想来源：Pi Durable 的 checkpoint 事务写模式。
+function atomicWriteText(p: string, content: string): void {
   fs.mkdirSync(path.dirname(p), { recursive: true });
-  fs.writeFileSync(p, content, "utf8");
+  const tmp = `${p}.tmp.${process.pid}`;
+  fs.writeFileSync(tmp, content, "utf8");
+  fs.renameSync(tmp, p);
+}
+
+function writeCarryover(cwd: string, content: string): void {
+  atomicWriteText(carryoverPath(cwd), content);
+  appendCarryoverLog(cwd, content);
+}
+
+// ---------- 事件日志（append-only，可回放） ----------
+// 思想来源：Pi Durable 的 transcript —— 状态文件(CARRYOVER.md)只是最新视图，
+// 事实序列存在 carryover.log 里，误删/写坏时可人工回放找回。
+
+const LOG_FILE = "carryover.log";
+
+function carryoverLogPath(cwd: string): string {
+  return path.join(cwd, STORE_DIR, LOG_FILE);
+}
+
+function appendCarryoverLog(cwd: string, content: string): void {
+  try {
+    const p = carryoverLogPath(cwd);
+    const entry = [
+      "```carryover-entry",
+      `@ ${new Date().toISOString()}`,
+      content,
+      "```",
+      "",
+    ].join("\n");
+    fs.appendFileSync(p, entry, "utf8");
+  } catch {
+    /* 日志是尽力而为的附加物，绝不影响主写入 */
+  }
 }
 
 // ---------- 会话联动（最近会话文件路径，独立存储避免被全量覆盖） ----------
@@ -84,9 +118,7 @@ function sessionMetaPath(cwd: string): string {
 function writeSessionMeta(cwd: string, sessionFile: string | undefined): void {
   if (!sessionFile) return; // --no-session 模式没有会话文件
   try {
-    const p = sessionMetaPath(cwd);
-    fs.mkdirSync(path.dirname(p), { recursive: true });
-    fs.writeFileSync(p, sessionFile, "utf8");
+    atomicWriteText(sessionMetaPath(cwd), sessionFile);
   } catch {
     /* ignore */
   }
@@ -381,7 +413,7 @@ export function writeTopicArchive(cwd: string, summary: string, tokensBefore: nu
       summary,
       "",
     ].join("\n");
-    fs.writeFileSync(file, content, "utf8");
+    atomicWriteText(file, content);
     const all = fs.readdirSync(dir).filter((f) => f.endsWith(".md")).sort();
     while (all.length > MAX_ARCHIVES) fs.rmSync(path.join(dir, all.shift()!), { force: true });
     return file;
@@ -583,11 +615,18 @@ export default function (pi: ExtensionAPI) {
     if (!saved) {
       try {
         const entries: SessionEntryLike[] = ctx.sessionManager.getBranch();
+        const totalUserMsgs = entries.filter((e) => e.type === "message" && e.message?.role === "user").length;
         const raw = fallbackExtract(entries);
         if (raw.trim()) {
+          // 完整性标记（思想来源：Pi Durable 对被打断任务的 aborted 标记）——
+          // 显式告诉模型这份记录不完整，避免把截断内容当完整上下文做判断。
+          const incompleteness =
+            totalUserMsgs > FALLBACK_MAX_USER_MSGS
+              ? `⚠️ 本记录仅覆盖最近 ${FALLBACK_MAX_USER_MSGS} 条用户消息（本次会话共 ${totalUserMsgs} 条），早期对话内容未包含。请保守使用：只作为线索，不要当作完整上下文。\n\n`
+              : `⚠️ 以下为最近对话原始记录（因 LLM 不可用，未生成精简摘要）。\n\n`;
           const header =
             `<!-- carryover: 降级抓取 @ ${new Date().toISOString()}（LLM 不可用/超时） -->\n` +
-            `⚠️ 以下为最近对话原始记录（因 LLM 不可用，未生成精简摘要）。\n\n`;
+            incompleteness;
           writeCarryover(cwd, header + raw);
           if (ctx.hasUI) ctx.ui.notify("💾 工作承接已保存 (降级抓取)", "warning");
         }
@@ -650,24 +689,30 @@ export default function (pi: ExtensionAPI) {
     };
 
     const ok = await engine.init(choice, ensureModel);
-    if (ok) {
-      ctx.ui.notify(
-        tt(
-          lang,
-          `🌀 语义话题检测就绪（${choice === "auto" ? "中英自动路由" : choice === "zh" ? "中文" : "英文"}，离线运行约 2ms/条）`,
-          `🌀 Semantic topic detection ready (${choice === "auto" ? "zh+en auto-routing" : choice === "zh" ? "Chinese" : "English"}, offline, ~2ms/msg)`,
-        ),
-        "info",
-      );
-    } else {
-      ctx.ui.notify(
-        tt(
-          lang,
-          "🌀 语义模型下载失败（网络不稳）。可重试 /carryover embed on；期间用词法降级检测",
-          "🌀 Model download failed (unstable network). Retry via /carryover embed on; falling back to lexical detection",
-        ),
-        "warning",
-      );
+    // v1.2.1: setupEmbed 是后台异步任务（可能跨会话替换/压缩存活），到达这里时
+    // 当初捕获的 ctx 可能已 stale——notify 全部包保护，不让后台下载的结果炸掉当前会话。
+    try {
+      if (ok) {
+        ctx.ui.notify(
+          tt(
+            lang,
+            `🌀 语义话题检测就绪（${choice === "auto" ? "中英自动路由" : choice === "zh" ? "中文" : "英文"}，离线运行约 2ms/条）`,
+            `🌀 Semantic topic detection ready (${choice === "auto" ? "zh+en auto-routing" : choice === "zh" ? "Chinese" : "English"}, offline, ~2ms/msg)`,
+          ),
+          "info",
+        );
+      } else {
+        ctx.ui.notify(
+          tt(
+            lang,
+            "🌀 语义模型下载失败（网络不稳）。可重试 /carryover embed on；期间用词法降级检测",
+            "🌀 Model download failed (unstable network). Retry via /carryover embed on; falling back to lexical detection",
+          ),
+          "warning",
+        );
+      }
+    } catch {
+      /* ctx stale / headless：通知失败不影响功能 */
     }
     return ok;
   }
@@ -679,14 +724,18 @@ export default function (pi: ExtensionAPI) {
     if (cfg.embed.choice === "off") return;
     const choice = cfg.embed.choice === "zh" || cfg.embed.choice === "en" ? cfg.embed.choice : "auto";
     const totalMB = choice === "auto" ? 46 : 23;
-    ctx.ui.notify(
-      tt(
-        lang,
-        `🌀 首次启用语义话题检测：后台下载本地模型（~${totalMB}MB，离线运行约 2ms/条，进度见状态栏）。不需要可 /carryover embed off 关闭`,
-        `🌀 Enabling semantic topic detection: downloading local models (~${totalMB}MB, offline, ~2ms/msg; progress in status bar). Disable anytime via /carryover embed off`,
-      ),
-      "info",
-    );
+    try {
+      ctx.ui.notify(
+        tt(
+          lang,
+          `🌀 首次启用语义话题检测：后台下载本地模型（~${totalMB}MB，离线运行约 2ms/条，进度见状态栏）。不需要可 /carryover embed off 关闭`,
+          `🌀 Enabling semantic topic detection: downloading local models (~${totalMB}MB, offline, ~2ms/msg; progress in status bar). Disable anytime via /carryover embed off`,
+        ),
+        "info",
+      );
+    } catch {
+      /* headless / ctx 状态异常时静默 */
+    }
     settingUp = setupEmbed(ctx, choice, lang).then(() => {});
   }
 
